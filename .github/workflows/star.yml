@@ -2,37 +2,114 @@ name: Star Swarm
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # setiap 5 minit
-  workflow_dispatch:          # boleh run manual
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  run-swarm:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install requests
-        run: pip install requests
 
       - name: Run swarm
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          STAR_DESTINASI: "micro-drama Melayu"
-          STAR_AGENTS: "50"
-        run: python star.py
+          DESTINASI: "TEMPLATE NOTION BISNES"
+          AGENTS: "50"
+          MODEL: "openai/gpt-oss-120b"
+        run: |
+          pip install requests -q
+          cat > star.py << 'PYEOF'
+          import os, time, sqlite3, hashlib, requests
+          from datetime import datetime
 
-      - name: Upload DB artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: star-db-${{ github.run_number }}
-          path: star.db
-          retention-days: 30
+          KEY = os.environ["GROQ_API_KEY"]
+          DEST = os.environ["DESTINASI"]
+          N = int(os.environ["AGENTS"])
+          MODEL = os.environ["MODEL"]
+          URL = "https://api.groq.com/openai/v1/chat/completions"
+          ROLES = ["Planner","Research","Creative","Builder","Refiner","QC","Rebel","Verifier"]
+
+          conn = sqlite3.connect("star.db")
+          conn.executescript("""
+          CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, role TEXT, content TEXT, ts TEXT);
+          CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, agent TEXT, action TEXT, hash TEXT, prev TEXT);
+          """)
+          conn.commit()
+
+          mem_lama = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+          print(f"Memory sedia ada: {mem_lama}")
+
+          def ledger(agent, action):
+              cur = conn.cursor()
+              last = cur.execute("SELECT hash FROM ledger ORDER BY id DESC LIMIT 1").fetchone()
+              prev = last[0] if last else "GENESIS"
+              ts = datetime.now().isoformat()
+              h = hashlib.sha256(f"{ts}{agent}{action}{prev}".encode()).hexdigest()[:10]
+              cur.execute("INSERT INTO ledger (ts,agent,action,hash,prev) VALUES (?,?,?,?,?)",
+                          (ts, agent, action, h, prev))
+              conn.commit()
+
+          def call(system, prompt, retry=3):
+              for a in range(retry):
+                  try:
+                      r = requests.post(URL,
+                          headers={"Authorization": f"Bearer {KEY}"},
+                          json={"model": MODEL, "messages": [
+                              {"role":"system","content":system},
+                              {"role":"user","content":prompt}],
+                              "max_tokens":400, "temperature":0.9}, timeout=60)
+                      if r.status_code == 429:
+                          time.sleep(30); continue
+                      r.raise_for_status()
+                      return r.json()["choices"][0]["message"]["content"]
+                  except Exception as e:
+                      if a < retry-1: time.sleep(3); continue
+                      raise
+
+          ctx = ""
+          ok = 0
+          err = 0
+
+          for i in range(N):
+              role = ROLES[i % len(ROLES)]
+              nama = f"{role[:4]}_{i:04d}"
+              try:
+                  out = call(f"Kau {nama} ({role}). Destinasi: {DEST}. Output unik.",
+                             f"TASK: {DEST}\nKONTEKS: {ctx[:600]}")
+                  conn.execute("INSERT INTO memory (agent,role,content,ts) VALUES (?,?,?,?)",
+                               (nama, role, out[:400], datetime.now().isoformat()))
+                  conn.commit()
+                  ledger(nama, "ok")
+                  ctx = out[:600]
+                  ok += 1
+                  print(f"[{i+1}/{N}] {nama} OK")
+              except Exception as e:
+                  ledger(nama, "err")
+                  err += 1
+                  print(f"[{i+1}/{N}] {nama} FAIL: {str(e)[:100]}")
+              time.sleep(2)
+
+          mem = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+          print(f"\n=== {ok}/{N} OK | {err} FAIL | Total Memory: {mem} ===")
+          PYEOF
+          python star.py
+
+      - name: Save DB ke repo (memory kekal)
+        run: |
+          git config user.name "swarm-bot"
+          git config user.email "bot@swarm.local"
+          git add star.db || true
+          git commit -m "swarm run $(date +%s)" || true
+          git push || true
