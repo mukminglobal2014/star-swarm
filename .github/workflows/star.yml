@@ -1,0 +1,38 @@
+name: Star Swarm
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # setiap 5 minit
+  workflow_dispatch:          # boleh run manual
+
+jobs:
+  run-swarm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Run swarm
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          STAR_DESTINASI: "micro-drama Melayu"
+          STAR_AGENTS: "50"
+        run: python star.py
+
+      - name: Upload DB artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: star-db-${{ github.run_number }}
+          path: star.db
+          retention-days: 30
